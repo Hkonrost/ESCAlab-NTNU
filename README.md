@@ -21,4 +21,5 @@ If you want to suggest any changes or new functionality to the code, I suggest t
 3) Once your code matches the online master version (plus additional changes you have made), then you can submit a pull request and I will consider merging the changes suggested into the master file.
 
 Enjoy the code!
+
 H.
