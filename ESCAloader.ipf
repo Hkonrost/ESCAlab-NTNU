@@ -515,7 +515,7 @@ Function/WAVE ESCA_ReadTrace(dataPath,dataDest,mode)
 		nt = 11 
 	ElseIf(stringMatch(sftwStr, "2.10.75") == 1) // Bristol
 		nsk_FN = 10 
-		nsk_FOV = -1
+		nsk_FOV = 7
 		nt = 12
 	ElseIf(stringMatch(sftwStr, "2.15.99") == 1) // NTNU QuSpin
 		nsk_FN = 10
