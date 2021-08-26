@@ -435,6 +435,7 @@ End
 Function ESCA_GenerateCursors()
 	
 	// Image wave and location
+	Svar panelName = root:ESCAglobals:PanelName
 	Svar stackfullPath = root:ESCAglobals:ES_stackFullPath
 	Wave ESCAStack =  root:ESCAglobals:w_stack
 	
@@ -465,6 +466,7 @@ Function ESCA_GenerateCursors()
 		csrdy = cursors[1][1]
 		Cursor /W=$stackfullPath /s=2/c=(red,green,blue)/P/I/H=0 C $(nameOfWave(ESCAstack)) csrcx,csrcy
 		Cursor /W=$stackfullPath /s=2/c=(red,green,blue)/P/I/H=0 D $(nameOfWave(ESCAstack)) csrdx,csrdy
+		ShowInfo/W=$panelName/CP=1
 			
 	Else
 	
@@ -945,10 +947,13 @@ Function ESCA_exportSurface(ctrlName):ButtonControl
 			surfaceName += energySyffix
 	EndIf		
 
-	// 5: Navigate to destination data folder, duplicate image wave
+	// 5: Navigate to destination data folder, allocate image wave
+	Variable dimP = DimSize(ESCAStack,0)
+	Variable dimQ = DimSize(ESCAStack,1)
 	NewDataFolder/O/S  $surfaceDest
-	Duplicate/O/RMD=[][][currLayer] ESCAStack, $surfaceName
+	Make/O/D/N=(dimP,dimQ) $surfaceName
 	Wave surfNew = $surfaceName
+	surfNew = ESCAStack[p][q][currLayer]
 	
 	// 6: Display new image wave, including FOV if info is available
 	NewImage/K=1/F/S=0 surfNew
