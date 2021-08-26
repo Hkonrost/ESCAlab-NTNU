@@ -1,13 +1,14 @@
 ﻿#pragma TextEncoding = "UTF-8"
 #pragma rtGlobals=3		// Use modern global access method and strict wave access.
-#include ":ESCAImgProcs"
 
 // Written by: Håkon I. Røst, NTNU
 // hakon.i.rost@ntnu.no
 
 // v.1 July 2020: first incarnation, with image editing buttons
-// V.2 August 2020: Add slider to image panel, IFF user selects a stack instead of single image
+// V.2 August 2020: Added slider to image panel, IFF user selects a stack instead of single image
 // V.3 April 2021: Display calibrated FOV in image panel with proper unit
+// V.4 June 2021: Added functionality for re-defining ARPES px center position using cursor in ROI panel
+// V.5 August 2021: Functions for rotating around the center px and also "rotational averaging" added to ROI panel
 
 // ===========================================================================================
 // 										Initialize NanoESCA image panel
@@ -16,7 +17,6 @@
 // is selected from "ESCAlab" menu
 
 // Initialize global variables, open NanoESCA image panel
-
 
 Function Init_ESCAImgPanel()
 
@@ -133,16 +133,16 @@ Window ESCAImg(waveFullPath) : Panel
 	SetActiveSubwindow ##
 	
 	// Finally, activate buttons and display image
-	ESCA_DispImage(imgWindowName,waveFullPath)			// Display image
-	ESCA_ImgCtrlSetup(imgWindowName,waveFullPath)		// Link controls to global variables in parent folder
-	ESCA_ImgSliderSetup()										// Update sliders to match image contrast extremes
+	ESCA_DispImage(waveFullPath)			// Display image
+	ESCA_ImgCtrlSetup(waveFullPath)		// Link controls to global variables in parent folder
+	ESCA_ImgSliderSetup()						// Update sliders to match image contrast extremes
 	
 EndMacro
 
 //---------------------------------------------------------------------------
 
-Function ESCA_DispImage(imgWindowName,waveFullPath)
-	String imgWindowName,waveFullPath
+Function ESCA_DispImage(waveFullPath)
+	String waveFullPath
 	
 	// Obtain relevant wave info
 	Wave img = $waveFullPath
@@ -218,8 +218,8 @@ End
 
 
 // Links sliders and buttons to the right global variables
-Function ESCA_ImgCtrlSetup(imgWindowName,waveFullPath)
-	String imgWindowName, waveFullPath
+Function ESCA_ImgCtrlSetup(waveFullPath)
+	String waveFullPath
 	
 	wave imgWave = $waveFullPath
 	string DF = GetWavesDataFolder(imgWave,1)
@@ -541,10 +541,11 @@ Function ESCA_ROIpanel(DisplaySettings,checked) : CheckBoxControl
 	If (checked == 1)
 	
 		// (1) Define subwindow
-		NewPanel/K=2/W=(0,0,175,120)/N=$ROIPanelName/HOST=$parentWindowName/EXT=0
+		NewPanel/K=2/W=(0,0,175,280)/N=$ROIPanelName/HOST=$parentWindowName/EXT=0
 		ModifyPanel/W=$ROIPanelName fixedSize=0
 		SetDrawLayer UserBack
-		DrawRect 5,5,170,115
+		//DrawRect 5,5,170,170
+		DrawRect 5,5,170,275
 	
 		// (2) Set up button controls
 		CheckBox ActivateCircROI,pos={24.00,9.00},size={63.00,12.00},title="Circular "
@@ -555,8 +556,17 @@ Function ESCA_ROIpanel(DisplaySettings,checked) : CheckBoxControl
 		SetVariable ROIwidth fstyle=1,variable=radius
 		Button calcCircCut,pos={10,55},size={75.00,50},title="Integrate\nROI through\nstack"
 		Button calcCircCut,fStyle=1,fSize=10,fColor=(43690,43690,43690),proc=ESCA_ROICut
-		Button CalcHorizCut,pos={90.00,55.00},size={75.00,50.00},title="Calculate\nlinear ROI"
+		Button CalcHorizCut,pos={90.00,55.00},size={75.00,50.00},title="Calculate\nlinear cut"
 		Button CalcHorizCut,fSize=10,fColor=(43690,43690,43690),fStyle=1,proc=ESCA_ROICut
+		Button RedefineCenter, pos={10.00,110.00},size={155,50.00}
+		Button RedefineCenter, title="Redefine center of image\nbased on cursor position"
+		Button RedefineCenter,fSize=10,fColor=(43690,43690,43690),fStyle=1,proc=ESCA_defineCenter
+		Button Rotation, pos={10.00,165.00},size={155,50.00}
+		Button Rotation, title="Rotate around center px"
+		Button Rotation,fSize=10,fColor=(43690,43690,43690),fStyle=1,proc=ESCA_Rotation
+		Button Symmetrize, pos={10.00,220.00},size={155,50.00}
+		Button Symmetrize, title="Perform rotational averaging"
+		Button Symmetrize,fSize=10,fColor=(43690,43690,43690),fStyle=1,proc=ESCA_symmRotation
 		SetActiveSubwindow ##
 	
 		// (3) activate and display cursor
@@ -565,6 +575,7 @@ Function ESCA_ROIpanel(DisplaySettings,checked) : CheckBoxControl
 		csry = cursors[1]
 		Cursor /W=$SPPath/H=1/S=2/c=(red,green,blue)/P/I G $(nameOfWave(img)) csrx,csry
 		SetWindow $panelName hook(myHook)=imgPanel_CursorMovedHook // Install hook function
+		ShowInfo/W=$panelName/CP=3
 	
 		// (4) allocate ROI waves
 		Make/D/O/N=(4000) $(DF+"ovalx") = 0, $(DF+"ovaly") = 0
@@ -574,6 +585,7 @@ Function ESCA_ROIpanel(DisplaySettings,checked) : CheckBoxControl
 	Else // Unchecked: Kill ROI control window
 	
 		activeCursor = 0
+		HideInfo/W=$panelName
 		Cursor/W=$SPPath/K G
 		RemoveFromGraph/w=$SPPath/Z ovalx, ovaly, horizTopX, horizTopY, horizBottomX, horizBottomY
 		ovalx = 0				// Release dependcy function
@@ -891,6 +903,444 @@ End
 
 //---------------------------------------------------------------------------
 
+// When ROI panel is active:
+// 1. Takes the current position of the cursor G displayed on the image
+// 2. Forms a duplicate wave with the cursor pos. used as the center px of each layer
+// 3. Optional: Re-displays the updated/re-centered image in a new image panel
+Function ESCA_defineCenter(ctrlName):ButtonControl
+	string ctrlName
+
+	// (i) Allocate reference to relevant global variables
+	String panelName = WinName(0,64)
+	String SPPath = ESCA_getSubPanelPath()
+	String imgName = ESCA_topWaveDisplayed()
+	Wave img = ImageNameToWaveRef(SPPath,imgName)
+	String DF = GetWavesDataFolder(img,1)
+	Nvar varMax = $(DF+"varMax")
+	
+	// (ii) Obtain cursor position defining ARPES center
+	Variable pG = pcsr(G,SPPath)
+	Variable qG = qcsr(G,SPPath)
+	
+	// (iii) Obtain dimensions for the ARPES wave in question
+	Variable dimP = dimsize(img, 0)
+	Variable dimQ = dimsize(img, 1)
+	Variable dimR = dimsize(img, 2)
+
+	// (iv) Determine offset between cursors position and image center
+	Variable dP = round(pG - dimP/2 + 1) // +1 corrects for zero indexing
+	Variable dQ = round(qG - dimQ/2 + 1) // +1 corrects for zero indexing
+	Printf "New center is shifted by dx=%d and dy=%d \n", dP, dQ
+	
+	// (v) Re-center wave, obtain reference to the (new) corrected one
+	Wave newImg = ESCA_newCenterPos(img,dimP,dimQ,dimR,dP,dQ)
+	
+	// (vi) If user clicks "Yes": kill existing img panel and display new wave in new img panel
+	DoAlert 1, "Would you like to kill the current image and display\nthe image (stack) with the corrected center?"
+	If(V_flag == 1)
+				
+		ESCA_ROIpanel("activateROIpanel",0)
+		Removeimage/W=$SPPath $imgName
+		AppendImage/W=$SPPath newImg
+		ESCA_ROIpanel("activateROIpanel",1)
+		ESCA_imgContrast("ContrastMax", varMax,0)
+				
+	EndIf	
+	
+End
+
+//---------------------------------------------------------------------------
+
+// This function takes in a 2D or 3D wave, its dimensions and the offset between
+// the current image center and the "true" px position of the image center.
+// A new wave is defined, with its center is set to match the corrected center pos.
+// The corrected wave is returned as a reference.
+Function/WAVE ESCA_newCenterPos(imgWave,dimP,dimQ,dimR,dP,dQ)
+	Wave imgWave					// Wave to redefine center position for
+	Variable dimP, dimQ, dimR	// Dimensionts of input wave
+	Variable dP, dQ					// offset between current and true image center
+
+	// (i) Allocate new wave (to be centered)
+	String DF = GetWavesDataFolder(imgWave,1)
+	String centeredWaveName = 	DF + NameOfWave(imgWave) + "_center"
+	Duplicate/O/D imgWave, $centeredWaveName
+	Wave centeredWave = $centeredWaveName
+	
+	Variable BckgIntensity = (imgWave[0][0]+imgWave[0][dimQ-1]+imgWave[dimP-1][0]+imgWave[dimP-1][dimQ-1]) / 4
+	centeredwave = BckgIntensity
+	
+	// (ii) Define cursor position as wave center in p,q for all layers of the wave
+	If((dimP > 0) && (dimQ > 0) && (dimR == 0))	// 2D wave input
+
+		If((dP >= 0) && (dQ >= 0))			// Center in Q1
+			centeredWave[0,(dimP-1)-dP][0,(dimQ-1)-dQ] = imgWave[p+dP][q+dQ]
+		ElseIf((dP <= 0) && (dQ >= 0)) 	// Center in Q2
+			centeredWave[-dP,dimP-1][0,(dimQ-1)-dQ] = imgWave[p+dP][q+dQ]
+		ElseIf((dP <= 0) && (dQ <= 0)) 	// Center in Q3
+			centeredWave[-dP,dimP-1][-dQ,dimQ-1] = imgWave[p+dP][q+dQ]
+		ElseIf((dP >= 0) && (dQ <= 0)) 	// Center in Q4
+			centeredWave[0,(dimP-1)-dP][-dQ,dimQ-1] = imgWave[p+dP][q+dQ]
+		EndIf
+		
+	ElseIf((dimP > 0) && (dimQ > 0) && (dimR > 0))		// 3D wave input
+	
+		If((dP >= 0) && (dQ >= 0))			// Center in Q1
+			centeredWave[0,(dimP-1)-dP][0,(dimQ-1)-dQ][] = imgWave[p+dP][q+dQ][r]
+		ElseIf((dP <= 0) && (dQ >= 0)) 	// Center in Q2
+			centeredWave[-dP,dimP-1][0,(dimQ-1)-dQ] = imgWave[p+dP][q+dQ][r]
+		ElseIf((dP <= 0) && (dQ <= 0)) 	// Center in Q3
+			centeredWave[-dP,dimP-1][-dQ,dimQ-1] = imgWave[p+dP][q+dQ][r]
+		ElseIf((dP >= 0) && (dQ <= 0)) 	// Center in Q4
+			centeredWave[0,(dimP-1)-dP][-dQ,dimQ-1] = imgWave[p+dP][q+dQ][r]
+		EndIf
+	
+	Else
+			
+		Abort "Dimensionality of the experimental ARPES wave supplied is not 2D or 3D."
+	
+	EndIf
+
+	Return centeredWave
+
+End
+
+//---------------------------------------------------------------------------
+
+// Take input wave and rotate by degrees N around the center position in the 
+// (p,q) plane of the image (stack).
+Function ESCA_Rotation(ctrlName):ButtonControl
+	String ctrlName
+	
+	// (i) Check with user that the current image has a correct centering
+	String alertStr = "NOTE: you are now rotating the image in the panel around the\n"
+	alertStr += "current pixel center position (p,q) in the image subwindow.\n\n"
+	alertStr += "YES = continue; NO and Cancel = abort."
+	
+	DoAlert/T="Is the image centered?" 2, alertStr
+	
+	If((V_flag == 2) || (V_flag == 3))
+		Return -1		// User aborted
+	EndIf
+	
+	// (ii) Allocate relevant references to global variables and related info
+	String panelName = WinName(0,64)
+	String SPPath = ESCA_getSubPanelPath()
+	String imgName = ESCA_topWaveDisplayed()
+	Wave img = ImageNameToWaveRef(SPPath,imgName)
+	
+	String DF = GetWavesDataFolder(img,1)
+	Nvar varMax = $(DF+"varMax")
+	Variable dimP = dimsize(img, 0)
+	Variable dimQ = dimsize(img, 1)
+	Variable dimR = dimsize(img, 2)
+	
+	// (iii) Allow user to specify the rotational symmetry degree N and a name for the new wave
+	Variable degr
+	String newWaveName
+	
+	Prompt degr, "Specify the number of degrees you wish to rotate around the origin\n(rotation is clockwise in the display):"
+	Prompt newWaveName, "Specify the name of the new output wave"
+	DoPrompt "Specify rotation and new wave name", degr, newWaveName
+	
+	String rotImgName = DF + newWaveName
+	
+	// (iv) Perform rotation averaging of image displayed
+	If((dimP > 0) && (dimQ > 0) && (dimR == 0))		// 2D wave input
+		
+		// (a) make a local copy of "img" and center it:
+		Duplicate/O img, img_center
+		SetScale/I x -(dimP-1)/2, (dimP-1)/2, img_center
+		SetScale/I y -(dimQ-1)/2, (dimQ-1)/2, img_center
+		
+		// (b) Rotate the image by the number of degrees specified by the user
+		Wave tempImg = ESCA_Rotate2D(img_center,degr)
+		
+		// (c) Store the rotated wave generated in the same folder as "img",
+		//		 under the name specified by the user
+		Duplicate/O img_center, $rotImgName
+		Wave rotWave = $rotImgName
+		rotWave = tempImg(x)(y)
+		
+		// (d) Kill temporary waves
+		KillWaves/Z tempImg, img_center
+	
+	ElseIf((dimP > 0) && (dimQ > 0) && (dimR > 0))	// 3D wave input
+	
+		// (a) Duplicate the input wave
+		Duplicate/O img, $rotImgName
+		Wave rotWave = $rotImgName
+	
+		// Extract each layer of the stack, rotate it and put it back into the stack
+		Variable jj
+		For (jj=0;jj<dimR;jj++)
+		
+			// (a) make a local copy of img[][][jj] and center it:
+			Make/D/O/N=(dimP,dimQ) currLayer
+			currLayer = img[p][q][jj]
+			SetScale/I x -(dimP-1)/2, (dimP-1)/2, currLayer
+			SetScale/I y -(dimQ-1)/2, (dimQ-1)/2, currLayer
+			
+			// (b) Rotate the image N times and add each rotation together
+			Wave img_rot = ESCA_Rotate2D(currLayer,degr)
+			
+			// (c) Copy the rotated wave into currLayer for the relevant (centered) x,y range
+			currLayer = img_rot(x)(y)
+			
+			// (d) Store current rotated image in layer jj of the new image stack, kill temporary waves
+			ImageTransform/P=(jj)/PTYP=0/D=currLayer setPlane rotWave
+			Printf "\nLayer %d out of %d has been rotated by %f degrees", (jj+1), dimR, degr
+			KillWaves/Z currLayer, img_rot
+		
+		EndFor
+			
+	Else
+	
+		Abort "Dimensionality of the experimental ARPES wave supplied is not 2D or 3D."
+	
+	EndIf
+	
+	// (v) Reset the x and y axes of rotWave
+	SetScale/I x 0, (dimP-1), rotWave
+	SetScale/I y 0, (dimQ-1), rotWave
+	
+	// (vi) Signify success to the user
+	String finalDestination = DF + NameOfWave(rotWave)
+	Printf "\nSuccess! The rotated wave has been storen in %s\n", finalDestination
+	
+	// (vii) If user clicks "Yes": kill existing img panel and display new wave in new img panel
+	DoAlert 1, "Would you like to kill the current image and display\nthe rotated image (stack) instead?"
+	If(V_flag == 1)
+				
+		ESCA_ROIpanel("activateROIpanel",0)
+		Removeimage/W=$SPPath $imgName
+		AppendImage/W=$SPPath rotWave
+		ESCA_ROIpanel("activateROIpanel",1)
+		ESCA_imgContrast("ContrastMax", varMax,0)
+				
+	EndIf	
+
+End
+
+//---------------------------------------------------------------------------
+
+// Take input wave and correct for directionally dependent intensity variations 
+// by performing an N-fold rotation and adding together each symmetric rotation
+// of the image.
+Function ESCA_symmRotation(ctrlName):ButtonControl
+	String ctrlName
+	
+	// (i) Check with user that the current image has a correct centering
+	String alertStr = "NOTE: you are now rotating the image in the panel around the\n"
+	alertStr += "current pixel center position (p,q) in the image subwindow.\n\n"
+	alertStr += "YES = continue; NO and Cancel = abort."
+	
+	DoAlert/T="Is the image centered?" 2, alertStr
+	
+	If((V_flag == 2) || (V_flag == 3))
+		Return -1		// User aborted
+	EndIf
+	
+	// (ii) Allocate relevant references to global variables and related info
+	String panelName = WinName(0,64)
+	String SPPath = ESCA_getSubPanelPath()
+	String imgName = ESCA_topWaveDisplayed()
+	Wave img = ImageNameToWaveRef(SPPath,imgName)
+	
+	String DF = GetWavesDataFolder(img,1)
+	Variable dimP = dimsize(img, 0)
+	Variable dimQ = dimsize(img, 1)
+	Variable dimR = dimsize(img, 2)
+	
+	// (iii) Allow user to specify the rotational symmetry degree N and a name for the new wave
+	Variable degN
+	String newWaveName
+	
+	Prompt degN, "Specify the rotational symmetry around the origin: ", popup, "1;2;3;4;6"
+	Prompt newWaveName, "Specify the name of the new output wave"
+	DoPrompt "Specify symmetry and new wave name", degN, newWaveName
+	
+	String symmImgName = DF + newWaveName
+
+	If(degN == 5)		// entry #5 on the list was chosen
+		degN +=1
+	EndIf
+	
+	// (iv) Perform rotation averaging of image displayed
+	If((dimP > 0) && (dimQ > 0) && (dimR == 0))		// 2D wave input
+		
+		// (a) make a local copy of "img" and center it:
+		Duplicate/O img, img_center
+		SetScale/I x -(dimP-1)/2, (dimP-1)/2, img_center
+		SetScale/I y -(dimQ-1)/2, (dimQ-1)/2, img_center
+		
+		// (b) Rotate the image N times and add each rotation together
+		Wave img_rot = ESCA_symmetrize(img_center,degN)
+		
+		// (c) Store the symmetrized wave generated in the same folder as "img",
+		//		 under the name specified by the user
+		Duplicate/O img_rot, $symmImgName
+		Wave symmRotWave = $symmImgName
+		KillWaves/Z img_rot, img_center
+	
+	ElseIf((dimP > 0) && (dimQ > 0) && (dimR > 0))	// 3D wave input
+	
+		// (a) Duplicate the input wave
+		Duplicate/O img, $symmImgName
+		Wave symmRotWave = $symmImgName
+	
+		// Extract each layer of the stack, rotate it and put it back into the stack
+		Variable jj
+		For (jj=0;jj<dimR;jj++)
+		
+			// (a) make a local copy of img[][][jj] and center it:
+			Make/D/O/N=(dimP,dimQ) currLayer
+			currLayer = img[p][q][jj]
+			SetScale/I x -(dimP-1)/2, (dimP-1)/2, currLayer
+			SetScale/I y -(dimQ-1)/2, (dimQ-1)/2, currLayer
+			
+			// (b) Rotate the image N times and add each rotation together
+			Wave img_rot = ESCA_symmetrize(currLayer,degN)
+			
+			// (c) Store current rotated image in layer jj of the new image stack
+			ImageTransform/P=(jj)/PTYP=0/D=img_rot setPlane symmRotWave
+			Printf "\nLayer %d out of %d has been symmetrized", (jj+1), dimR	
+			KillWaves/Z currLayer, img_rot
+		
+		EndFor
+	
+	Else
+	
+		Abort "Dimensionality of the experimental ARPES wave supplied is not 2D or 3D."
+	
+	EndIf
+	
+	// (v) Signify success to the user
+	String finalDestination = DF + NameOfWave(symmRotWave)
+	Printf "\nSuccess! The rotationally averaged (symmetrized) wave has been storen in %s\n", finalDestination
+
+End
+
+//---------------------------------------------------------------------------
+
+Function/Wave ESCA_symmetrize(img2D,degN)
+	Wave img2D		// input 2D image
+	Variable degN	// N fold rotational symmetry degree
+	
+	// (i) obtain relevant dimensions for the image to be rotated
+	Duplicate/O img2D, img2D_rot
+	Variable dimP = DimSize (img2D,0)
+	Variable dimQ = DimSize (img2D,1)
+	SetScale/I x -(dimP-1)/2, (dimP-1)/2, img2D_rot
+	SetScale/I y -(dimQ-1)/2, (dimQ-1)/2, img2D_rot
+	Img2D_rot = 0								// start with an empty wave
+	
+	Variable anglePerRot = 360/degN		// (360 degrees)/(No. rotations)
+	
+	Variable ii
+	For(ii=0;ii<degN;ii++)
+		Wave tempImg = ESCA_Rotate2D(img2D,ii*anglePerRot)
+		Img2D_rot += tempImg(x)(y)
+	EndFor
+	
+	KillWaves/Z tempImg
+	Return img2D_rot
+				
+End
+
+
+//---------------------------------------------------------------------------
+
+Function/Wave ESCA_Rotate2D(w,angle)
+	Wave w
+	Variable angle
+	
+	// ===================================================================================
+	// (1) Obtain new x and y scale after rotation
+	// ===================================================================================
+	
+	// (i) Define rotation matrix
+	Make/O/N=(2,2) RotMatrix
+	RotMatrix[0][0] = cos(angle*pi/180)
+	RotMatrix[0][1] = - sin(angle*pi/180)
+	RotMatrix[1][0] = sin(angle*pi/180)
+	RotMatrix[1][1] = cos(angle*pi/180)
+	
+	// (ii) Define corners
+	Variable kx_max = Max(DimOffset(w,0)+DimDelta(w,0)*(DimSize(w,0)-1),DimOffset(w,0))
+	Variable kx_min = Min(DimOffset(w,0)+DimDelta(w,0)*(DimSize(w,0)-1),DimOffset(w,0))
+	Variable ky_max = Max(DimOffset(w,1)+DimDelta(w,1)*(DimSize(w,1)-1),DimOffset(w,1))
+	Variable ky_min = Min(DimOffset(w,1)+DimDelta(w,1)*(DimSize(w,1)-1),DimOffset(w,1))
+	Make/O/N=(2) C1, C2, C3, C4
+	C1 = {kx_max,ky_max}	// Q1
+	C2 = {kx_min,ky_max}	// Q2
+	C3 = {kx_min,ky_min}	// Q3
+	C4 = {kx_max,ky_min}	// Q4
+	
+	// (iii) Rotate the current range, figure out the new max and min kx and ky values achieved
+	MatrixOP/O C1_rot = RotMatrix x C1
+	MatrixOP/O C2_rot = RotMatrix x C2
+	MatrixOP/O C3_rot = RotMatrix x C3
+	MatrixOP/O C4_rot = RotMatrix x C4
+	Variable new_kx_max = Max(C1_rot[0],C2_rot[0],C3_rot[0],C4_rot[0])
+	Variable new_kx_min = Min(C1_rot[0],C2_rot[0],C3_rot[0],C4_rot[0])
+	Variable new_ky_max = Max(C1_rot[1],C2_rot[1],C3_rot[1],C4_rot[1])
+	Variable new_ky_min = Min(C1_rot[1],C2_rot[1],C3_rot[1],C4_rot[1])
+	
+	// (iV) Find the new step size in kx and ky
+	Make/O/N=(2) kSteps_old
+	kSteps_old[0] = DimDelta(w,0)
+	kSteps_old[1] = DimDelta(w,1)
+	MatrixOP/O kSteps_new = RotMatrix x kSteps_old
+	
+	// ===================================================================================
+	// (2) Rotate the 2D wave around the origin
+	// ===================================================================================
+	
+	// (i) Allocate rotated wave 
+	Make/O/N=(Round(Abs((new_kx_max-new_kx_min)/kSteps_new[0])),Round(Abs((new_ky_max-new_ky_min)/kSteps_new[1]))) w_rot
+	SetScale/I x, new_kx_min, new_kx_max, w_rot
+	SetScale/I y, new_ky_min, new_ky_max, w_rot
+	//SetScale/I x, new_kx_max, new_kx_min, w_rot
+	//SetScale/I y, new_ky_max, new_ky_min, w_rot
+	
+	w_rot = interp2d(w,x*rotMatrix[0][0]+y*rotMatrix[0][1],x*rotMatrix[1][0]+y*rotMatrix[1][1])
+	correctNaNs(w_rot)
+
+	// (ii) Kill temporary waves
+	KillWaves/Z rotMatrix, C1, C2, C3, C4, C1_rot, C2_rot, C3_rot, C4_rot, kSteps_old, kSteps_new
+	
+	Return w_rot
+	
+End
+
+//---------------------------------------------------------------------------
+
+// Loop runds over a 2D wave and changes all values of NaN to zeros
+Function correctNaNs(w)
+	Wave w
+
+	Variable dimP = dimsize(w,0)
+	Variable dimQ = dimsize(w,1)
+	Variable ii, jj, value
+	
+	For(ii=0;ii<dimP;ii++)
+		For(jj=0;jj<dimQ;jj++)
+		
+			value = w[ii][jj] 
+		
+			If(numtype(value) == 2)
+				w[ii][jj] = 0
+			EndIf
+		
+		EndFor
+	EndFor
+	
+	Return 1
+End
+
+//---------------------------------------------------------------------------
+
+
 // Kills NanoESCA image panel, restores data folder to root
 Function ESCA_killImgPanel(ctrlName):ButtonControl
 	string ctrlName
@@ -902,6 +1352,13 @@ Function ESCA_killImgPanel(ctrlName):ButtonControl
 	String DF = GetWavesDataFolder(img,1)
 	Wave cursors = $(DF+"cursors")
 	Wave color = $(DF+"rgbColor")
+	Wave ovalx = $(DF+"ovalx")
+	Wave ovaly = $(DF+"ovaly")
+	Wave ROImask = $(DF+"ROImask")
+	Wave horizTopX = $(DF+"horizTopX")
+	Wave horizTopY = $(DF+"horizTopY")
+	Wave horizBottomX = $(DF+"horizBottomX")
+	Wave horizBottomY = $(DF+"horizBottomY")
 	
 	// Extract name of panel, kill
 	String winStr=WinName(0,64)
@@ -909,6 +1366,7 @@ Function ESCA_killImgPanel(ctrlName):ButtonControl
 	
 	// Kill supporting waves from subfolder
 	KillWaves/Z cursors, color 
+	Killwaves/Z ovalx, ovaly, ROImask, horizTopX, horizTopY, horizBottomX, horizBottomY
 	
 	SetDataFolder root:					// Set path to root folder
 	
