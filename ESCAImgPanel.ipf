@@ -467,13 +467,14 @@ Function ESCA_savePEEMImg(ctrlName):ButtonControl
 	// 3: Navigate to destination data folder, duplicate image wave
 	NewDataFolder/O/S  $procImgDest
 	
-	If (numLayers > 1)
-		Duplicate/O/RMD=[][][currLayer] img, $procImgName
+	If (numLayers > 0)
+		Make/O/N=(np,nq) $procImgName
+		Wave imgNew = $procImgName
+		imgNew = img[p][q][currLayer]
 	Else
 		Duplicate/O img, $procImgName
+		Wave imgNew = $procImgName
 	EndIf
-	
-	Wave imgNew = $procImgName
 	
 	// 4: display new image wave, including FOV if info is available
 	NewImage/K=1/F/S=0 imgNew
